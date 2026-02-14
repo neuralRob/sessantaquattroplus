@@ -78,21 +78,70 @@ def reader_thread_func(socket_conn, num_channels, bytes_in_sample):
 # CSV Writer Thread Function (supports stopping via stop_event)
 # -----------------------------------------------------------------------------
 def csv_writer_thread_func(csv_filename, stop_event):
-    """Continuously takes samples from the csv_queue and writes them to a CSV file until stop_event is set."""
+    """Continuously takes samples from the csv_queue and writes them to a CSV file in batches."""
+    BATCH_SIZE = 100 # Write 100 samples at a time (adjust as needed)
+    samples_batch = []
+    last_flush_time = time.time()
+    FLUSH_INTERVAL = 1.0 # Flush buffer every 1 second (adjust as needed)
+
+    print(f"CSV Writer started. Batch size: {BATCH_SIZE}, Flush interval: {FLUSH_INTERVAL}s")
+
     with open(csv_filename, 'w', newline='') as csvfile:
         writer = csv.writer(csvfile)
         first_item = True
-        while not stop_event.is_set():
+
+        while not stop_event.is_set() or samples_batch: # Process remaining batch even after stop event
             try:
+                # Get a sample, wait longer if needed, but check stop_event often
                 sample = csv_queue.get(timeout=0.1)
+                samples_batch.append(sample)
+                csv_queue.task_done() # Notify queue item is processed
+
             except queue.Empty:
-                continue
-            if first_item:
-                header = [f"Channel{i+1}" for i in range(len(sample))]
-                writer.writerow(header)
-                first_item = False
-            writer.writerow(sample)
-            csvfile.flush()
+                # Queue is empty, check if we should stop or flush
+                if stop_event.is_set() and not samples_batch:
+                    break # Stop event set and batch is empty, exit loop
+                # Check if it's time to flush remaining items
+                if samples_batch and time.time() - last_flush_time > FLUSH_INTERVAL:
+                    # print(f"CSV flushing {len(samples_batch)} items due to timeout...") # Debug
+                    if first_item and samples_batch:
+                        header = [f"Channel{i+1}" for i in range(len(samples_batch[0]))]
+                        writer.writerow(header)
+                        first_item = False
+                    writer.writerows(samples_batch)
+                    csvfile.flush() # Flush the OS buffer
+                    samples_batch = []
+                    last_flush_time = time.time()
+                continue # Go back to waiting for samples
+
+            # Write batch if full
+            if len(samples_batch) >= BATCH_SIZE:
+                # print(f"CSV writing batch of {len(samples_batch)}...") # Debug
+                if first_item:
+                    header = [f"Channel{i+1}" for i in range(len(samples_batch[0]))]
+                    writer.writerow(header)
+                    first_item = False
+                writer.writerows(samples_batch)
+                samples_batch = [] # Clear the batch
+
+                # Optional: Flush periodically based on time, not just on batch size or stop
+                current_time = time.time()
+                if current_time - last_flush_time > FLUSH_INTERVAL:
+                    # print("CSV flushing buffer...") # Debug
+                    csvfile.flush()
+                    last_flush_time = current_time
+
+        # --- After loop ---
+        # Write any remaining items in the batch when stopping
+        if samples_batch:
+            print(f"CSV writing final batch of {len(samples_batch)}...")
+            if first_item: # Handle case where file might be empty
+                 header = [f"Channel{i+1}" for i in range(len(samples_batch[0]))]
+                 writer.writerow(header)
+            writer.writerows(samples_batch)
+            csvfile.flush() # Final flush
+
+    print("CSV Writer finished.")
 
 def lsl_trigger_listener_thread(q_):
     """Listens for LSL triggers ('ActionTriggers') and puts them onto the queue."""
@@ -160,7 +209,7 @@ if PLOT_DATA:
             self.win.show()
             self.timer = QtCore.QTimer()
             self.timer.timeout.connect(self.update)
-            self.timer.start(10)  # Update every 10 ms.
+            self.timer.start(50)  # Update every 10 ms.
 
         def update(self):
             # Process main channels.
