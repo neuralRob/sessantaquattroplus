@@ -32,7 +32,7 @@ ALPHA = 0.01           # Exponential filter coefficient for computing the envelo
 track_color = ['k', 'k', 'k', 'k', 'k', 'k', 'k']
 
 # --- Frequenza di trasmissione LSL per l'inviluppo ---
-LSL_ENVELOPE_TARGET_RATE_HZ = 200 # Esempio: invia l'inviluppo a 100 Hz
+LSL_ENVELOPE_TARGET_RATE_HZ = 100 # Esempio: invia l'inviluppo a 100 Hz
 
 # -----------------------------------------------------------------------------
 # Global Queues for inter-thread communication - NOW WITH BOUNDED SIZES
@@ -49,7 +49,7 @@ trigger_queue = queue.Queue(maxsize=10)
 global_envelope = None
 env_lock = threading.Lock()
 lsl_outlet = None
-NUM_LSL_CHANNELS = 8
+NUM_LSL_CHANNELS = 6
 LSL_TRANSMISSION = False
 lsl_downsample_factor = 1
 
