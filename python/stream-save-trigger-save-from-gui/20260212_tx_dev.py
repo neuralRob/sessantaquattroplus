@@ -26,7 +26,7 @@ PLOT_DATA = True  # Display the real-time plot (for main channels and auxiliary)
 # --- NUOVA FLAG GLOBALE: Controlla se il plotting è attualmente attivo ---
 PLOT_ACTIVE = True # Se PLOT_DATA è True, il plotting sarà inizialmente attivo
 
-NUM_PLOT_CHANNELS = 6  # Number of main channels to display (the auxiliary channel is plotted separately)
+NUM_CHANNELS = 6  # Number of main channels to display (the auxiliary channel is plotted separately)
 AUX_INDEX = 8          # Index for auxiliary channel (e.g. first auxiliary channel)
 ALPHA = 0.01           # Exponential filter coefficient for computing the envelope
 track_color = ['k', 'k', 'k', 'k', 'k', 'k', 'k']
@@ -49,9 +49,42 @@ trigger_queue = queue.Queue(maxsize=10)
 global_envelope = None
 env_lock = threading.Lock()
 lsl_outlet = None
-NUM_LSL_CHANNELS = 6
 LSL_TRANSMISSION = False
 lsl_downsample_factor = 1
+
+# -----------------------------------------------------------------------------
+# Utilities to properly load filter coefficients
+# -----------------------------------------------------------------------------
+class BiquadDF2T:
+    """Direct Form II Transposed biquad: y = b0*x + z1; z1 = b1*x - a1*y + z2; z2 = b2*x - a2*y"""
+    __slots__ = ("b0","b1","b2","a1","a2","z1","z2")
+    def __init__(self, b0,b1,b2,a1,a2):
+        self.b0 = float(b0); self.b1 = float(b1); self.b2 = float(b2)
+        self.a1 = float(a1); self.a2 = float(a2)
+        self.z1 = 0.0; self.z2 = 0.0
+
+    def process(self, x: float) -> float:
+        y = self.b0*x + self.z1
+        self.z1 = self.b1*x - self.a1*y + self.z2
+        self.z2 = self.b2*x - self.a2*y
+        return y
+
+class Cascade:
+    __slots__ = ("sections",)
+    def __init__(self, sections):
+        self.sections = sections  # list[BiquadDF2T]
+
+    def process(self, x: float) -> float:
+        for s in self.sections:
+            x = s.process(x)
+        return x
+
+def make_cascade_from_sos(sos):
+    secs = []
+    for (b0,b1,b2,a0,a1,a2) in sos:
+        # assumiamo a0=1
+        secs.append(BiquadDF2T(b0,b1,b2,a1,a2))
+    return Cascade(secs)
 
 # -----------------------------------------------------------------------------
 # Reader Thread Function
@@ -67,15 +100,32 @@ def reader_thread_func(socket_conn, num_channels, bytes_in_sample):
             sample_bytes = communication.read_raw_bytes(socket_conn, num_channels, bytes_in_sample)
             sample_values = communication.bytes_to_integers(
                 sample_bytes, num_channels, bytes_in_sample, output_milli_volts=False)
+            
+            # --- 1) Filter needed channels
+            raw_emg = sample_values[:NUM_CHANNELS]
+            filt_emg = [0.0] * NUM_CHANNELS
+            env_emg = [0.0] * NUM_CHANNELS
 
-            # Only put data into the csv_queue if recording is active
+            for i in range(NUM_CHANNELS):
+                x = float(raw_emg[i])
+                # bandpass
+                x = emg_bp_filters[i].process(x)
+                # notch
+                x = emg_notch_filters[i].process(x)
+                filt_emg[i] = x
+                # envelope
+                x_env = abs(x)
+                x_env = env_lp_filters[i].process(x_env)
+                env_emg[i] = x_env
+
+            # --- 2) Save raw activity from all channels if asked
             if RECORDING:
                 csv_queue.put(sample_values)
             
-            # Condiziona l'inserimento nelle code di plotting al flag PLOT_ACTIVE
+            # --- 3) Fill queue for plotting if active
             if PLOT_DATA and PLOT_ACTIVE:
                 try:
-                    plot_queue.put_nowait(sample_values[0:NUM_PLOT_CHANNELS])
+                    plot_queue.put_nowait(filt_emg[0:NUM_CHANNELS])
                 except queue.Full:
                     pass
 
@@ -85,16 +135,16 @@ def reader_thread_func(socket_conn, num_channels, bytes_in_sample):
                     except queue.Full:
                         pass
 
-            if LSL_TRANSMISSION and len(sample_values) >= NUM_LSL_CHANNELS:
+            # --- 4) LSL: send env_emg, downsampled
+            if LSL_TRANSMISSION and len(sample_values) >= NUM_CHANNELS:
                 env_lock.acquire()
-                for i in range(NUM_LSL_CHANNELS):
-                    global_envelope[i] = ALPHA * abs(sample_values[i]) + (1 - ALPHA) * global_envelope[i]
+                for i in range(NUM_CHANNELS):
+                    global_envelope[i] = env_emg[i]
                 env_lock.release()
 
                 global_lsl_push_counter += 1
                 if lsl_downsample_factor == 1 or (global_lsl_push_counter % lsl_downsample_factor == 0):
-                    current_env_to_send = global_envelope.copy()
-                    lsl_outlet.push_sample(current_env_to_send)
+                    lsl_outlet.push_sample(global_envelope.copy())
                     if lsl_downsample_factor > 1:
                         global_lsl_push_counter = 0
                         
@@ -275,6 +325,28 @@ if PLOT_DATA:
 # Main Function: Setup Socket, Threads, UI Controls, and LSL Outlet
 # -----------------------------------------------------------------------------
 def main():
+    # --- Initialize filters 
+    # load SOS coefficients from stored files (which are created separately from code in get-filter-coeffs.ipynb)
+    sos_bp = np.loadtxt("sos_bp.csv", delimiter=",")
+    sos_notch = np.loadtxt("sos_notch.csv", delimiter=",")
+    sos_env = np.loadtxt("sos_env.csv", delimiter=",")
+    
+    # reshape to ensure proper loading
+    if sos_bp.ndim == 1:
+        sos_bp = sos_bp.reshape(1, -1)
+    if sos_notch.ndim == 1:
+        sos_notch = sos_notch.reshape(1, -1)
+    if sos_env.ndim == 1:
+        sos_env = sos_env.reshape(1, -1)
+
+    global emg_bp_filters
+    global emg_notch_filters
+    global env_lp_filters
+    emg_bp_filters = [make_cascade_from_sos(sos_bp) for _ in range(NUM_CHANNELS)]
+    emg_notch_filters = [make_cascade_from_sos(sos_notch) for _ in range(NUM_CHANNELS)]
+    env_lp_filters = [make_cascade_from_sos(sos_env) for _ in range(NUM_CHANNELS)]
+    
+    # --- Set up TCP socket
     ip_address = '0.0.0.0'
     port = 45454
 
@@ -306,8 +378,8 @@ def main():
 
 
     global global_envelope, lsl_outlet, LSL_TRANSMISSION
-    global_envelope = [0.0] * NUM_LSL_CHANNELS
-    info = StreamInfo('EMGEnvelope', 'EMG', NUM_LSL_CHANNELS, lsl_stream_srate, 'float32', 'myuid34234')
+    global_envelope = [0.0] * NUM_CHANNELS
+    info = StreamInfo('EMGEnvelope', 'EMG', NUM_CHANNELS, lsl_stream_srate, 'float32', 'myuid34234')
     lsl_outlet = StreamOutlet(info)
     LSL_TRANSMISSION = False
 
@@ -348,7 +420,7 @@ def main():
         mainLayout.addLayout(controlLayout)
         
         plot_arraysize = int(device_sample_frequency * 10)
-        plotter = Plotter(NUM_PLOT_CHANNELS, plot_arraysize, device_sample_frequency)
+        plotter = Plotter(NUM_CHANNELS, plot_arraysize, device_sample_frequency)
         
         # Aggiungi il widget del plotter al layout (la sua visibilità sarà controllata)
         mainLayout.addWidget(plotter.win)
