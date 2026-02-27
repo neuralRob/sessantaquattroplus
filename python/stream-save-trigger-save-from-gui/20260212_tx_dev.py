@@ -412,7 +412,7 @@ def main():
             if should_be_recording and not RECORDING:
                 print("Starting recording...")
                 os.makedirs("data", exist_ok=True)
-                filename = os.path.join("data", datetime.datetime.now().strftime("%Y%m%d_%H%M%S.csv"))
+                filename = os.path.join("data", datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f.csv"))
                 filenameLineEdit.setText(filename)
                 statusLabel.setText("Recording...")
                 saveButton.setText("Stop")
