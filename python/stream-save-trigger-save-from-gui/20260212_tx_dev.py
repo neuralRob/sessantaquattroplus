@@ -118,9 +118,9 @@ def reader_thread_func(socket_conn, num_channels, bytes_in_sample):
                 x_env = env_lp_filters[i].process(x_env)
                 env_emg[i] = x_env
 
-            # --- 2) Save raw activity from all channels if asked
+            # --- 2) Save filtered activity from all channels if asked
             if RECORDING:
-                csv_queue.put(sample_values)
+                csv_queue.put(filt_emg)
             
             # --- 3) Fill queue for plotting if active
             if PLOT_DATA and PLOT_ACTIVE:
