@@ -135,7 +135,9 @@ def reader_thread_func(socket_conn, num_channels, bytes_in_sample):
                     except queue.Full:
                         pass
 
-            # --- 4) LSL: send env_emg, downsampled
+            # --- 4) LSL: send env_emg, downsampled.
+            # prove da fare: vedi se funziona con frequenze di campionamento più alte (200, 500, 1000); e vedi se questa quantità di dati da fastidio alla ricezione (queue, plot, ecc)
+            # vedi se levando env_lock velocizza un po'
             if LSL_TRANSMISSION and len(sample_values) >= NUM_CHANNELS:
                 env_lock.acquire()
                 for i in range(NUM_CHANNELS):
@@ -147,6 +149,12 @@ def reader_thread_func(socket_conn, num_channels, bytes_in_sample):
                     lsl_outlet.push_sample(global_envelope.copy())
                     if lsl_downsample_factor > 1:
                         global_lsl_push_counter = 0
+
+            # # --- 4a.) LSL: versione di prova da testare (commenti sopra e scommenti questa - ho levato il env_lock)
+            # # altra prova: aumenta la frequenza da 100 a 200, 500, 1000; vedi se va; e controlla se questa quantità di dati da fastidio alla ricezione (queue, plot, ecc)
+            # # se fai questo, ricordati di settare la frequenza dell'outlet
+            # if LSL_TRANSMISSION and len(sample_values) >= NUM_CHANNELS:
+            #     lsl_outlet.push_sample(env_emg)
                         
         except Exception as e:
             print(f"Error in reader_thread_func: {e}")
